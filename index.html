@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Слова-Мины | Party Game</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #ef4444;
+      --primary: #6366f1;
+      --success: #22c55e;
+      --text: #f8fafc;
+      --subtext: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+    body { background: var(--bg); color: var(--text); display: flex; justify-content: center; min-height: 100vh; padding: 12px; }
+    .container { width: 100%; max-width: 480px; display: flex; flex-direction: column; gap: 16px; }
+    .card { background: var(--card-bg); border-radius: 16px; padding: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+    h1 { color: #f43f5e; text-align: center; margin-bottom: 12px; }
+    .btn { background: var(--primary); color: white; border: none; padding: 14px; border-radius: 12px; font-weight: bold; font-size: 16px; width: 100%; cursor: pointer; margin-top: 8px; }
+    .btn-danger { background: var(--accent); }
+    .btn-success { background: var(--success); }
+    input, select { width: 100%; padding: 14px; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 16px; margin-bottom: 12px; }
+    .timer-badge { font-size: 32px; font-weight: 800; text-align: center; color: #f59e0b; }
+    .word-box { background: #0284c7; padding: 16px; border-radius: 12px; text-align: center; font-size: 26px; font-weight: bold; margin: 12px 0; }
+    .player-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+    .player-item { background: #0f172a; padding: 10px 14px; border-radius: 8px; display: flex; justify-content: space-between; }
+    .mine-card { background: #0f172a; padding: 12px; border-radius: 10px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .like-btn { background: #334155; border: none; padding: 6px 12px; border-radius: 20px; color: white; cursor: pointer; }
+    .screen { display: none; }
+    .screen.active { display: block; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="screen-login" class="card screen active">
+      <h1>💣 Слова-Мины</h1>
+      <input type="text" id="nickname-input" placeholder="Введите ваш ник" maxlength="15" />
+      <input type="text" id="room-input" placeholder="Код комнаты (если подключаетесь)" style="text-transform: uppercase;" />
+      <button class="btn" onclick="joinRoom()">Присоединиться</button>
+      <button class="btn btn-success" onclick="createRoom()">Создать комнату</button>
+    </div>
+
+    <div id="screen-lobby" class="card screen">
+      <h2 style="text-align:center;">Комната: <span id="display-room-code" style="color: #38bdf8;"></span></h2>
+      <p style="text-align:center; color: var(--subtext); margin-bottom: 10px;">Игроки:</p>
+      <ul class="player-list" id="lobby-players"></ul>
+
+      <div id="host-controls" style="margin-top: 16px;">
+        <label>Категория слов:</label>
+        <select id="category-select">
+          <option value="general">Обычные слова</option>
+          <option value="easy">Простые слова</option>
+          <option value="hard">Сложные слова</option>
+        </select>
+        <button class="btn btn-danger" onclick="startGame()">Начать игру</button>
+      </div>
+    </div>
+
+    <div id="screen-mining" class="card screen">
+      <h3 style="text-align:center;">Фаза минирования 💣</h3>
+      <div class="timer-badge" id="mining-timer">45</div>
+
+      <div id="secret-word-container">
+        <p style="text-align:center; color: var(--subtext);">Секретное слово:</p>
+        <div class="word-box" id="secret-word-display">...</div>
+      </div>
+
+      <div id="miner-input-section">
+        <input type="text" id="mine-input" placeholder="Введите 1 слово-мину" />
+        <button class="btn" onclick="saveMine()">Сохранить мину</button>
+        <p id="mine-status-msg" style="text-align:center; color: var(--success); margin-top: 8px;"></p>
+      </div>
+    </div>
+
+    <div id="screen-explain" class="card screen">
+      <h3 style="text-align:center;">Фаза объяснения 🎙️</h3>
+      <div id="explainer-word-view">
+        <div class="word-box" id="explainer-secret-word">...</div>
+      </div>
+      <div id="miners-controls" style="display:none; margin-top:16px;">
+        <button class="btn btn-danger" onclick="triggerMine()">💥 МИНА ВЗОРВАЛАСЬ!</button>
+        <button class="btn btn-success" onclick="triggerSuccess()">🎉 СЛОВО УГАДАНО!</button>
+      </div>
+    </div>
+
+    <div id="screen-results" class="card screen">
+      <h2 id="round-result-title" style="text-align:center;"></h2>
+      <div id="mines-like-list" style="margin: 16px 0;"></div>
+      <button class="btn" onclick="requestNextRound()">Следующий раунд</button>
+    </div>
+
+    <div id="screen-leaderboard" class="card">
+      <h3 style="text-align:center; margin-bottom: 8px;">🏆 Рейтинг</h3>
+      <ul class="player-list" id="leaderboard-players"></ul>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    let currentRoom = '', myRole = '';
+
+    function showScreen(id) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    function createRoom() {
+      const nickname = document.getElementById('nickname-input').value.trim();
+      if (nickname) socket.emit('create_room', { nickname });
+    }
+
+    function joinRoom() {
+      const nickname = document.getElementById('nickname-input').value.trim();
+      const roomId = document.getElementById('room-input').value.trim().toUpperCase();
+      if (nickname && roomId) socket.emit('join_room', { nickname, roomId });
+    }
+
+    function startGame() {
+      const category = document.getElementById('category-select').value;
+      socket.emit('start_game', { roomId: currentRoom, category, timer: 45 });
+    }
+
+    function saveMine() {
+      const mineWord = document.getElementById('mine-input').value.trim();
+      socket.emit('submit_mine', { roomId: currentRoom, mineWord });
+    }
+
+    function triggerMine() { socket.emit('round_end', { roomId: currentRoom, result: 'exploded' }); }
+    function triggerSuccess() { socket.emit('round_end', { roomId: currentRoom, result: 'guessed' }); }
+    function requestNextRound() { socket.emit('next_round', { roomId: currentRoom }); }
+    function likeMine(authorId) { socket.emit('like_mine', { roomId: currentRoom, mineAuthorId: authorId }); }
+
+    socket.on('room_joined', ({ roomId, isHost }) => {
+      currentRoom = roomId;
+      document.getElementById('display-room-code').innerText = roomId;
+      document.getElementById('host-controls').style.display = isHost ? 'block' : 'none';
+      showScreen('screen-lobby');
+    });
+
+    socket.on('update_players', ({ players, leaderboard }) => {
+      document.getElementById('lobby-players').innerHTML = players.map(p => `<li class="player-item"><span>${p.nickname}</span></li>`).join('');
+      document.getElementById('leaderboard-players').innerHTML = leaderboard.map(p => `<li class="player-item"><span>${p.nickname}</span><strong>${p.score} pt</strong></li>`).join('');
+    });
+
+    socket.on('mining_phase_start', ({ role, targetWord, timer }) => {
+      myRole = role;
+      showScreen('screen-mining');
+      document.getElementById('secret-word-display').innerText = targetWord || '???';
+      document.getElementById('miner-input-section').style.display = role === 'trapper' ? 'block' : 'none';
+    });
+
+    socket.on('timer_tick', (t) => { document.getElementById('mining-timer').innerText = t; });
+    socket.on('mine_saved_success', () => { document.getElementById('mine-status-msg').innerText = '✓ Сохранено!'; });
+
+    socket.on('explain_phase_start', ({ targetWord }) => {
+      showScreen('screen-explain');
+      document.getElementById('explainer-secret-word').innerText = myRole === 'guesser' ? '❓ Слово скрыто' : targetWord;
+      document.getElementById('miners-controls').style.display = myRole === 'trapper' ? 'flex' : 'none';
+    });
+
+    socket.on('round_over', ({ result, targetWord, mines }) => {
+      showScreen('screen-results');
+      document.getElementById('round-result-title').innerText = result === 'exploded' ? '💥 ВЗРЫВ!' : '🎉 УГАДАНО!';
+      document.getElementById('mines-like-list').innerHTML = mines.map(m => `
+        <div class="mine-card">
+          <span><strong>${m.word}</strong> (${m.authorName})</span>
+          <button class="like-btn" onclick="likeMine('${m.authorId}')">❤️ ${m.likes}</button>
+        </div>
+      `).join('');
+    });
+
+    socket.on('error_message', (msg) => alert(msg));
+  </script>
+</body>
+</html>
